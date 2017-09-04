@@ -1,0 +1,129 @@
+---
+title: "Time Series Analysis"
+output: html_notebook
+---
+
+```{r}
+library(readr)
+library(ggplot2)
+library(dplyr)
+library(data.table)
+library(purrr)
+library(xgboost)
+library(lubridate)
+library(forecast)
+setwd("C:/Users/ankit/Desktop/R/TS")
+train <- fread("Train_SU63ISt.csv")
+test <- fread("Test_0qrQsBZ.csv")
+test[['Count']] <- NA
+```
+
+```{r}
+ggplot(combin,aes(y = Count, x = factor(Month))) + geom_boxplot() + facet_grid(Year ~ .)
+```
+
+
+```{r}
+ggplot(combin,aes(y = Count, x = factor(wday(combin$Datetime)))) + geom_boxplot() + facet_grid(. ~ Year)
+```
+
+```{r}
+ggplot(combin,aes(y = Count, x = factor(Year), fill = factor(Month))) + geom_boxplot()
+```
+
+```{r}
+ggplot(combin,aes(y = Count, x = factor(Hour))) + geom_boxplot() + facet_grid(Year ~ .)
+```
+
+```{r}
+combin <- rbindlist(list(train,test))
+combin$Datetime <- dmy_h(combin$Datetime)
+combin$Year <- year(combin$Datetime) - 2012
+combin$Day <- day(combin$Datetime)
+combin$Month <- month(combin$Datetime)
+combin$wday <- wday(combin$Datetime)
+combin$wend <- ifelse(wday(combin$Datetime) == "7" | wday(combin$Datetime, label = TRUE) == "1",1,0)
+combin$Hour <- hour(combin$Datetime)
+combin$NightHour <- ifelse(combin$Hour < 9 & combin$Hour > 1,1,0)
+
+```
+
+```{r}
+glimpse(combin)
+```
+
+
+```{r}
+combin.xgb <- combin[,c('ID','Year','Day','Month','wday','Hour','NightHour', 'wend')]
+
+```
+
+XGBoost Modelling
+
+```{r}
+library(dummies)
+combin.xgb <- dummy.data.frame(combin.xgb, names = c("wday", "Hour", "Month", "Day"), sep = "_")
+combin.xgb <- as.data.frame(map(combin.xgb, as.numeric))
+c.train <- combin.xgb[1:18288,]
+c.test <- combin.xgb[-(1:18288),]
+
+set.seed(123)
+y_train <- as.numeric(train$Count)
+dtrain <- xgb.DMatrix(as.matrix(c.train),label = y_train)
+dtest <- xgb.DMatrix(as.matrix(c.test))
+
+xgb_params = list(
+  booster = 'gbtree',
+  objective = 'reg:linear',
+  colsample_bytree=1,
+  eta=0.1,
+  max_depth=3,
+  subsample=0.8,
+  seed=5,
+  gamma = 0.1,
+  silent=TRUE)
+
+xgb.cv(xgb_params, dtrain, nrounds = 5635, nfold = 4, early_stopping_rounds = 20, print_every_n = 500)
+
+```
+
+```{r}
+bst <- xgb.train(data = dtrain, params = xgb_params,nround=2398)
+xgb.importance(feature_names = names(combin.xgb), model = bst)
+```
+
+```{r}
+y_pred.xgb = predict(bst, dtest)
+tail(y_pred.xgb)
+# sub_xgb <- data.frame(ID = test$ID, Count = y_pred.xgb)
+# write.csv(sub_xgb,"C:/Users/ankit/Desktop/R/TS/xgb_ts.csv", row.names = F)
+```
+
+```{r}
+y_pred.xgb_train = predict(bst, dtrain)
+plot(ts(y_pred.xgb_train[18120:18288]))
+lines(ts(train$Count[18120:18288]), col = 'red')
+lines(ts(fcdshw$fitted[18120:18288]), col = 'blue')
+```
+
+TS Modelling
+
+```{r}
+train$Datetime <- dmy_h(train$Datetime)
+library(xts)
+x.ts <- xts(train$Count, order.by = as_datetime(train$Datetime))
+ts <- ts(x.ts, freq = 168)
+```
+
+```{r}
+fcdshw <- dshw(ts, period1 = 24, period2 = 168, lambda = TRUE, armethod = T, h = 5112)
+# xy <- data.frame(ID = train$ID, fitted = fcdshw$fitted, observed = train$Count)
+# ggplot(xy, aes(x = ID, y = fitted)) + geom_line(col = 'red') + geom_line(aes(y = observed), col = 'blue')
+# sub <- data.frame(ID = test$ID, Count = fcdshw$mean)
+# write.csv(sub,"C:/Users/ankit/Desktop/R/TS/dshw_ar_ts_20.csv", row.names = F)
+```
+
+```{r}
+sub_ens <- data.frame(ID = test$ID, Count = 0.65 * fcdshw$mean + 0.35 * y_pred.xgb)
+write.csv(sub_ens,"C:/Users/ankit/Desktop/R/TS/ens_ts_6535.csv", row.names = F)
+```
